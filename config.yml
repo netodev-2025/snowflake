@@ -1,0 +1,7 @@
+epoch: "2025-02-07T00:00:00Z"
+timestampBits: 41
+datacenterBits: 5
+machineBits: 5
+sequenceBits: 12
+datacenterID: 2
+machineID: 5
