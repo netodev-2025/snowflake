@@ -1,5 +1,4 @@
 // pkg/snowflake/snowflake.go
-
 package snowflake
 
 import (
@@ -9,6 +8,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/Feralthedogg/Novum/pkg/composite"
+	"github.com/Feralthedogg/Novum/pkg/effect"
+	st "github.com/Feralthedogg/Novum/pkg/state"
 )
 
 type Config struct {
@@ -35,8 +38,7 @@ type Generator struct {
 	machineShift    uint
 
 	maxSequence int64
-
-	state int64
+	state       int64
 }
 
 func NewGenerator(config Config) (*Generator, error) {
@@ -66,9 +68,8 @@ func NewGenerator(config Config) (*Generator, error) {
 		timeShift:       config.DatacenterBits + config.MachineBits + config.SequenceBits,
 		datacenterShift: config.MachineBits + config.SequenceBits,
 		machineShift:    config.SequenceBits,
-
-		maxSequence: int64((1 << config.SequenceBits) - 1),
-		state:       0,
+		maxSequence:     int64((1 << config.SequenceBits) - 1),
+		state:           0,
 	}
 
 	return gen, nil
@@ -78,22 +79,25 @@ func (g *Generator) getCurrentTimestamp() int64 {
 	return time.Now().UnixNano()/int64(time.Millisecond) - g.epoch
 }
 
-func (g *Generator) NextID() (int64, error) {
-	for {
+func (g *Generator) NextIDComposite() composite.NovumComposite[int, any] {
+	return composite.Return[int, any](0, nil).Bind(func(_ int, _ any) composite.NovumComposite[int, any] {
 		oldState := atomic.LoadInt64(&g.state)
 		oldTs := oldState >> g.sequenceBits
 		oldSeq := oldState & ((1 << g.sequenceBits) - 1)
 		currentTs := g.getCurrentTimestamp()
 
 		if currentTs < oldTs {
-			return 0, errors.New("clock moved backwards, refusing to generate id")
+			return composite.Return[int, any](0, nil).
+				WithEffect(effect.NewLogEffect(
+					fmt.Sprintf("Clock moved backwards: currentTs=%d, oldTs=%d", currentTs, oldTs),
+				))
 		}
 
 		var newTs, newSeq int64
 		if currentTs == oldTs {
 			if oldSeq >= g.maxSequence {
 				time.Sleep(time.Millisecond)
-				continue
+				return g.NextIDComposite()
 			}
 			newTs = oldTs
 			newSeq = oldSeq + 1
@@ -104,19 +108,32 @@ func (g *Generator) NextID() (int64, error) {
 
 		newState := (newTs << g.sequenceBits) | newSeq
 		if atomic.CompareAndSwapInt64(&g.state, oldState, newState) {
-			id := (newTs << g.timeShift) |
+			id := int((newTs << g.timeShift) |
 				(g.datacenterID << g.datacenterShift) |
 				(g.machineID << g.machineShift) |
-				newSeq
-			return id, nil
+				newSeq)
+
+			return composite.Return[int, any](id, nil).
+				WithEffect(effect.NewLogEffect(fmt.Sprintf("Generated ID: %d", id)))
 		}
-	}
+
+		return composite.Return[int, any](0, nil).
+			WithEffect(effect.NewLogEffect("Failed to update state"))
+	}).WithContract(func(id int) bool {
+		return id > 0
+	})
 }
 
-func (g *Generator) Decode(id int64) (timestamp int64, datacenterID int64, machineID int64, sequence int64) {
-	timestamp = id >> g.timeShift
-	datacenterID = (id >> g.datacenterShift) & ((1 << g.datacenterBits) - 1)
-	machineID = (id >> g.machineShift) & ((1 << g.machineBits) - 1)
+func (g *Generator) NextID() (int, error) {
+	initialState := st.NewStateLayer(0)
+	id, _, _, err := g.NextIDComposite().Run(initialState)
+	return id, err
+}
+
+func (g *Generator) Decode(id int) (timestamp int, datacenterID int, machineID int, sequence int) {
+	timestamp = id >> int(g.timeShift)
+	datacenterID = (id >> int(g.datacenterShift)) & ((1 << g.datacenterBits) - 1)
+	machineID = (id >> int(g.machineShift)) & ((1 << g.machineBits) - 1)
 	sequence = id & ((1 << g.sequenceBits) - 1)
 	return
 }
@@ -180,6 +197,9 @@ func ParseConfigYAML(data []byte) (Config, error) {
 			}
 			cfg.MachineID = id
 		}
+	}
+	if cfg.Epoch.IsZero() {
+		return cfg, errors.New("epoch is not defined")
 	}
 	return cfg, nil
 }
