@@ -24,6 +24,10 @@ type Config struct {
 	MachineID      int64
 }
 
+type Deps struct {
+	Gen *Generator
+}
+
 type Generator struct {
 	epoch          int64
 	timestampBits  uint
@@ -79,16 +83,19 @@ func (g *Generator) getCurrentTimestamp() int64 {
 	return time.Now().UnixNano()/int64(time.Millisecond) - g.epoch
 }
 
-func (g *Generator) NextIDComposite() composite.NovumComposite[int, *Generator] {
-	return composite.Return[int, *Generator](0, g).Bind(func(_ int, deps *Generator) composite.NovumComposite[int, *Generator] {
-		gen := deps
+func (g *Generator) NextIDComposite() composite.NovumComposite[int, Deps] {
+	deps := Deps{
+		Gen: g,
+	}
+	return composite.Return[int, Deps](0, deps).Bind(func(_ int, d Deps) composite.NovumComposite[int, Deps] {
+		gen := d.Gen
 		oldState := atomic.LoadInt64(&gen.state)
 		oldTs := oldState >> gen.sequenceBits
 		oldSeq := oldState & ((1 << gen.sequenceBits) - 1)
 		currentTs := gen.getCurrentTimestamp()
 
 		if currentTs < oldTs {
-			return composite.Return[int, *Generator](0, gen).
+			return composite.Return[int, Deps](0, d).
 				WithEffect(effect.NewLogEffect(fmt.Sprintf("Clock moved backwards: currentTs=%d, oldTs=%d", currentTs, oldTs)))
 		}
 
@@ -111,10 +118,10 @@ func (g *Generator) NextIDComposite() composite.NovumComposite[int, *Generator] 
 				(gen.datacenterID << gen.datacenterShift) |
 				(gen.machineID << gen.machineShift) |
 				newSeq)
-			return composite.Return[int, *Generator](id, gen).
+			return composite.Return[int, Deps](id, d).
 				WithEffect(effect.NewLogEffect(fmt.Sprintf("Generated ID: %d", id)))
 		}
-		return composite.Return[int, *Generator](0, gen).
+		return composite.Return[int, Deps](0, d).
 			WithEffect(effect.NewLogEffect("Failed to update state"))
 	}).WithContract(func(id int) bool {
 		return id > 0

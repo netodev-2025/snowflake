@@ -1,13 +1,13 @@
 // main.go
-
 package main
 
 import (
 	"fmt"
 	"log"
 	"os"
-
+	"runtime"
 	"snowflake/pkg/snowflake"
+	"time"
 )
 
 func dir(path string) ([]byte, error) {
@@ -20,25 +20,34 @@ func main() {
 		log.Fatalf("Failed to read config file: %v", err)
 	}
 
-	config, err := snowflake.ParseConfigYAML(data)
+	cfg, err := snowflake.ParseConfigYAML(data)
 	if err != nil {
-		log.Fatalf("Error parsing config: %v", err)
+		log.Fatalf("failed to parse config: %v", err)
 	}
 
-	fmt.Printf("Loaded config: %+v\n", config)
-
-	generator, err := snowflake.NewGenerator(config)
+	gen, err := snowflake.NewGenerator(cfg)
 	if err != nil {
-		log.Fatalf("Failed to create generator: %v", err)
+		log.Fatalf("failed to create generator: %v", err)
 	}
 
-	id, err := generator.NextID()
-	if err != nil {
-		log.Fatalf("Failed to generate ID: %v", err)
-	}
-	fmt.Printf("Generated ID: %d\n", id)
+	var memBefore, memAfter runtime.MemStats
+	runtime.ReadMemStats(&memBefore)
 
-	timestamp, datacenterID, machineID, sequence := generator.Decode(id)
-	fmt.Printf("Decoded -> Timestamp: %d, Datacenter ID: %d, Machine ID: %d, Sequence: %d\n",
-		timestamp, datacenterID, machineID, sequence)
+	var count int
+	start := time.Now()
+	for time.Since(start) < time.Second {
+		_, err := gen.NextID()
+		if err != nil {
+			log.Fatalf("failed to generate id: %v", err)
+		}
+		count++
+	}
+	elapsed := time.Since(start)
+	runtime.ReadMemStats(&memAfter)
+
+	fmt.Printf("Generated %d IDs in %v\n", count, elapsed)
+	fmt.Printf("IDs per second: %d\n", count)
+	fmt.Printf("Average time per ID: %v\n", elapsed/time.Duration(count))
+	memUsed := memAfter.Alloc - memBefore.Alloc
+	fmt.Printf("Memory allocated: %d bytes\n", memUsed)
 }
