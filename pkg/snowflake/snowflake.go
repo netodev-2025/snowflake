@@ -1,4 +1,4 @@
-// pkg/snowflake/snowflake.go
+// snowflake.go
 package snowflake
 
 import (
@@ -83,10 +83,18 @@ func (g *Generator) getCurrentTimestamp() int64 {
 	return time.Now().UnixNano()/int64(time.Millisecond) - g.epoch
 }
 
-func (g *Generator) NextIDComposite() composite.NovumComposite[int, Deps] {
-	deps := Deps{
-		Gen: g,
+func (g *Generator) NextID() (int, error) {
+	initialState := st.NewStateLayer(0)
+	comp := g.NextIDComposite()
+	id, _, _, err := comp.Run(initialState)
+	if err != nil {
+		return 0, fmt.Errorf("failed to generate ID: %w", err)
 	}
+	return id, nil
+}
+
+func (g *Generator) NextIDComposite() composite.NovumComposite[int, Deps] {
+	deps := Deps{Gen: g}
 	return composite.Return[int, Deps](0, deps).Bind(func(_ int, d Deps) composite.NovumComposite[int, Deps] {
 		gen := d.Gen
 		oldState := atomic.LoadInt64(&gen.state)
@@ -95,18 +103,25 @@ func (g *Generator) NextIDComposite() composite.NovumComposite[int, Deps] {
 		currentTs := gen.getCurrentTimestamp()
 
 		if currentTs < oldTs {
-			return composite.Return[int, Deps](0, d).
-				WithEffect(effect.NewLogEffect(fmt.Sprintf("Clock moved backwards: currentTs=%d, oldTs=%d", currentTs, oldTs)))
+			diff := oldTs - currentTs
+			if diff > 5 {
+				return composite.Return[int, Deps](0, d).
+					WithEffect(effect.NewLogEffect(
+						fmt.Sprintf("Critical clock rollback detected: diff=%dms", diff),
+					))
+			}
+			currentTs = oldTs
 		}
 
 		var newTs, newSeq int64
 		if currentTs == oldTs {
 			if oldSeq >= gen.maxSequence {
-				time.Sleep(time.Millisecond)
-				return gen.NextIDComposite()
+				newTs = oldTs + 1
+				newSeq = 0
+			} else {
+				newTs = oldTs
+				newSeq = oldSeq + 1
 			}
-			newTs = oldTs
-			newSeq = oldSeq + 1
 		} else {
 			newTs = currentTs
 			newSeq = 0
@@ -119,20 +134,15 @@ func (g *Generator) NextIDComposite() composite.NovumComposite[int, Deps] {
 				(gen.machineID << gen.machineShift) |
 				newSeq)
 			return composite.Return[int, Deps](id, d).
-				WithEffect(effect.NewLogEffect(fmt.Sprintf("Generated ID: %d", id)))
+				WithEffect(effect.NewLogEffect(
+					fmt.Sprintf("Generated ID: %d", id),
+				))
 		}
 		return composite.Return[int, Deps](0, d).
 			WithEffect(effect.NewLogEffect("Failed to update state"))
 	}).WithContract(func(id int) bool {
 		return id > 0
 	})
-}
-
-func (g *Generator) NextID() (int, error) {
-	initialState := st.NewStateLayer(0)
-	comp := g.NextIDComposite()
-	id, _, _, err := comp.Run(initialState)
-	return id, err
 }
 
 func (g *Generator) Decode(id int) (timestamp int, datacenterID int, machineID int, sequence int) {
@@ -151,13 +161,16 @@ func ParseConfigYAML(data []byte) (Config, error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) < 2 {
 			continue
 		}
+
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
 		value = strings.Trim(value, "\"")
+
 		switch key {
 		case "epoch":
 			t, err := time.Parse(time.RFC3339, value)
@@ -203,6 +216,7 @@ func ParseConfigYAML(data []byte) (Config, error) {
 			cfg.MachineID = id
 		}
 	}
+
 	if cfg.Epoch.IsZero() {
 		return cfg, errors.New("epoch is not defined")
 	}
