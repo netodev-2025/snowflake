@@ -1,2 +1,4 @@
-github.com/Feralthedogg/Novum v0.0.0-20250302015518-d505f32157b3 h1:IGKxl0Y4+lHt4aagv+o9YQ+1OYx7dEfCoDBIuY2DYA4=
-github.com/Feralthedogg/Novum v0.0.0-20250302015518-d505f32157b3/go.mod h1:G96ynJLMsqxp7zPsGa7T1xb2lJM7tGiGQmMKgcLS7iw=
+github.com/Feralthedogg/Novum v0.0.0-20250305051133-7dae595ed17b h1:1x2AEAw2W79wQCibjO778z5+e6DyrMmE2uQCYxg/WCQ=
+github.com/Feralthedogg/Novum v0.0.0-20250305051133-7dae595ed17b/go.mod h1:q2KFr9L2xnqX9/VzyNpvrMeKy92l7+2fX8pgzg+swn8=
+golang.org/x/exp v0.0.0-20250228200357-dead58393ab7 h1:aWwlzYV971S4BXRS9AmqwDLAD85ouC6X+pocatKY58c=
+golang.org/x/exp v0.0.0-20250228200357-dead58393ab7/go.mod h1:BHOTPb3L19zxehTsLoJXVaTktb06DFgmdW6Wb9s8jqk=

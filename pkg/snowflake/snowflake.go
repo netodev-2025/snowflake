@@ -11,6 +11,7 @@ import (
 
 	"github.com/Feralthedogg/Novum/pkg/composite"
 	"github.com/Feralthedogg/Novum/pkg/effect"
+	"github.com/Feralthedogg/Novum/pkg/future"
 	st "github.com/Feralthedogg/Novum/pkg/state"
 )
 
@@ -83,19 +84,9 @@ func (g *Generator) getCurrentTimestamp() int64 {
 	return time.Now().UnixNano()/int64(time.Millisecond) - g.epoch
 }
 
-func (g *Generator) NextID() (int, error) {
-	initialState := st.NewStateLayer(0)
-	comp := g.NextIDComposite()
-	id, _, _, err := comp.Run(initialState)
-	if err != nil {
-		return 0, fmt.Errorf("failed to generate ID: %w", err)
-	}
-	return id, nil
-}
-
 func (g *Generator) NextIDComposite() composite.NovumComposite[int, Deps] {
 	deps := Deps{Gen: g}
-	return composite.Return[int, Deps](0, deps).Bind(func(_ int, d Deps) composite.NovumComposite[int, Deps] {
+	return composite.Return(0, deps).Bind(func(_ int, d Deps) composite.NovumComposite[int, Deps] {
 		gen := d.Gen
 		oldState := atomic.LoadInt64(&gen.state)
 		oldTs := oldState >> gen.sequenceBits
@@ -105,10 +96,9 @@ func (g *Generator) NextIDComposite() composite.NovumComposite[int, Deps] {
 		if currentTs < oldTs {
 			diff := oldTs - currentTs
 			if diff > 5 {
-				return composite.Return[int, Deps](0, d).
+				return composite.Return(0, d).
 					WithEffect(effect.NewLogEffect(
-						fmt.Sprintf("Critical clock rollback detected: diff=%dms", diff),
-					))
+						fmt.Sprintf("Critical clock rollback detected: diff=%dms", diff)))
 			}
 			currentTs = oldTs
 		}
@@ -133,16 +123,81 @@ func (g *Generator) NextIDComposite() composite.NovumComposite[int, Deps] {
 				(gen.datacenterID << gen.datacenterShift) |
 				(gen.machineID << gen.machineShift) |
 				newSeq)
-			return composite.Return[int, Deps](id, d).
+			return composite.Return(id, d).
 				WithEffect(effect.NewLogEffect(
-					fmt.Sprintf("Generated ID: %d", id),
-				))
+					fmt.Sprintf("Generated ID: %d", id)))
 		}
-		return composite.Return[int, Deps](0, d).
+		return composite.Return(0, d).
 			WithEffect(effect.NewLogEffect("Failed to update state"))
 	}).WithContract(func(id int) bool {
 		return id > 0
 	})
+}
+
+func (g *Generator) NextID() (int, error) {
+	initialState := st.NewStateLayer[int](0)
+	id, _, _, err := g.NextIDComposite().Run(initialState)
+	if err != nil {
+		return 0, fmt.Errorf("failed to generate ID: %w", err)
+	}
+	return id, nil
+}
+
+func (g *Generator) NextIDAsync() composite.NovumComposite[int, Deps] {
+	fut := future.NewFuture(func() (int, error) {
+		time.Sleep(10 * time.Millisecond)
+
+		oldState := atomic.LoadInt64(&g.state)
+		oldTs := oldState >> g.sequenceBits
+		oldSeq := oldState & ((1 << g.sequenceBits) - 1)
+		currentTs := g.getCurrentTimestamp()
+
+		if currentTs < oldTs {
+			diff := oldTs - currentTs
+			if diff > 5 {
+				return 0, errors.New(fmt.Sprintf("Critical clock rollback detected: diff=%dms", diff))
+			}
+			currentTs = oldTs
+		}
+
+		var newTs, newSeq int64
+		if currentTs == oldTs {
+			if oldSeq >= g.maxSequence {
+				newTs = oldTs + 1
+				newSeq = 0
+			} else {
+				newTs = oldTs
+				newSeq = oldSeq + 1
+			}
+		} else {
+			newTs = currentTs
+			newSeq = 0
+		}
+
+		newState := (newTs << g.sequenceBits) | newSeq
+		if atomic.CompareAndSwapInt64(&g.state, oldState, newState) {
+			id := int((newTs << g.timeShift) |
+				(g.datacenterID << g.datacenterShift) |
+				(g.machineID << g.machineShift) |
+				newSeq)
+			return id, nil
+		}
+		return 0, errors.New("failed to update state")
+	})
+	return composite.FromFuture(fut, Deps{Gen: g}).WithContract(func(id int) bool {
+		return id > 0
+	})
+}
+
+func (g *Generator) NextIDs(count int) ([]int, error) {
+	comps := make([]composite.NovumComposite[int, Deps], count)
+	for i := 0; i < count; i++ {
+		comps[i] = g.NextIDAsync()
+	}
+	parallelComp := composite.Parallel(comps)
+	initialState := st.NewStateLayer[int](0)
+	results, _, _, err := parallelComp.Run(initialState)
+	return results, err
 }
 
 func (g *Generator) Decode(id int) (timestamp int, datacenterID int, machineID int, sequence int) {
@@ -161,16 +216,13 @@ func ParseConfigYAML(data []byte) (Config, error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) < 2 {
 			continue
 		}
-
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
 		value = strings.Trim(value, "\"")
-
 		switch key {
 		case "epoch":
 			t, err := time.Parse(time.RFC3339, value)
@@ -216,7 +268,6 @@ func ParseConfigYAML(data []byte) (Config, error) {
 			cfg.MachineID = id
 		}
 	}
-
 	if cfg.Epoch.IsZero() {
 		return cfg, errors.New("epoch is not defined")
 	}
